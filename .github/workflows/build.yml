@@ -1,0 +1,494 @@
+name: Build AimLine APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate project files
+        run: |
+          mkdir -p app/src/main/java/com/example/aimline
+          cat > settings.gradle.kts <<'AIMLINE_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AimLine"
+          include(":app")
+          AIMLINE_EOF
+          cat > build.gradle.kts <<'AIMLINE_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          AIMLINE_EOF
+          cat > gradle.properties <<'AIMLINE_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          AIMLINE_EOF
+          cat > app/build.gradle.kts <<'AIMLINE_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.aimline"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.aimline"
+                  minSdk = 30
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          AIMLINE_EOF
+          cat > app/src/main/AndroidManifest.xml <<'AIMLINE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:label="Aim Line"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".OverlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          AIMLINE_EOF
+          cat > app/src/main/java/com/example/aimline/MainActivity.kt <<'AIMLINE_EOF'
+          package com.example.aimline
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+                  }
+                  val prefs = getSharedPreferences("p", MODE_PRIVATE)
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 120, 48, 48)
+                  }
+
+                  fun button(label: String, action: () -> Unit) {
+                      col.addView(Button(this).apply {
+                          text = label
+                          setOnClickListener { action() }
+                      })
+                  }
+
+                  button("1. Allow draw over other apps") {
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      )
+                  }
+                  button("2. Start aim line") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Do step 1 first", Toast.LENGTH_SHORT).show()
+                      } else {
+                          val mpm = getSystemService(MediaProjectionManager::class.java)
+                          startActivityForResult(mpm.createScreenCaptureIntent(), 1)
+                      }
+                  }
+                  button("Stop") { stopService(Intent(this, OverlayService::class.java)) }
+
+                  val label = TextView(this).apply { setPadding(0, 64, 0, 0) }
+                  val bar = SeekBar(this).apply { max = 60 }
+                  fun show(off: Int) { label.text = "Angle correction: $off\u00B0 (adjust if the line drifts clockwise/counter-clockwise)" }
+                  val saved = prefs.getInt("off", 0)
+                  bar.progress = saved + 30
+                  show(saved)
+                  bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                          prefs.edit().putInt("off", p - 30).apply()
+                          show(p - 30)
+                      }
+                      override fun onStartTrackingTouch(s: SeekBar) {}
+                      override fun onStopTrackingTouch(s: SeekBar) {}
+                  })
+                  col.addView(label)
+                  col.addView(bar)
+                  setContentView(col)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 1 && resultCode == RESULT_OK && data != null) {
+                      startForegroundService(
+                          Intent(this, OverlayService::class.java)
+                              .putExtra("code", resultCode)
+                              .putExtra("data", data)
+                      )
+                      Toast.makeText(this, "Running. Open your game now.", Toast.LENGTH_LONG).show()
+                      moveTaskToBack(true)
+                  }
+              }
+          }
+          AIMLINE_EOF
+          cat > app/src/main/java/com/example/aimline/Detector.kt <<'AIMLINE_EOF'
+          package com.example.aimline
+
+          import kotlin.math.atan2
+
+          /**
+           * Finds the player sprite (largest solid near-black blob) in an RGBA frame and
+           * estimates which way it faces: from the centre of the blob towards the centre
+           * of the light "iris" ring enclosed inside it.
+           */
+          class Detector(private val w: Int, private val h: Int) {
+
+              class Result(val x: Float, val y: Float, val angle: Float?)
+
+              private val dark = BooleanArray(w * h)
+              private val seen = BooleanArray(w * h)
+              private val queue = IntArray(w * h)
+              private val best = IntArray(w * h)
+
+              fun detect(px: ByteArray, stride: Int): Result? {
+                  for (y in 0 until h) {
+                      var o = y * stride
+                      val row = y * w
+                      for (x in 0 until w) {
+                          dark[row + x] = (px[o].toInt() and 255) < DARK &&
+                              (px[o + 1].toInt() and 255) < DARK &&
+                              (px[o + 2].toInt() and 255) < DARK
+                          o += 4
+                      }
+                  }
+
+                  // largest 8-connected dark component
+                  seen.fill(false)
+                  var bestN = 0
+                  for (s in 0 until w * h) {
+                      if (!dark[s] || seen[s]) continue
+                      var head = 0
+                      var tail = 0
+                      queue[tail++] = s
+                      seen[s] = true
+                      while (head < tail) {
+                          val p = queue[head++]
+                          val cx0 = p % w
+                          val cy0 = p / w
+                          for (dy in -1..1) for (dx in -1..1) {
+                              val nx = cx0 + dx
+                              val ny = cy0 + dy
+                              if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+                              val q = ny * w + nx
+                              if (dark[q] && !seen[q]) { seen[q] = true; queue[tail++] = q }
+                          }
+                      }
+                      if (tail > bestN) { bestN = tail; System.arraycopy(queue, 0, best, 0, tail) }
+                  }
+                  if (bestN < w * h * MIN_FRAC || bestN > w * h * MAX_FRAC) return null
+
+                  // bounding box
+                  var x0 = w; var x1 = 0; var y0 = h; var y1 = 0
+                  for (i in 0 until bestN) {
+                      val x = best[i] % w
+                      val y = best[i] / w
+                      if (x < x0) x0 = x
+                      if (x > x1) x1 = x
+                      if (y < y0) y0 = y
+                      if (y > y1) y1 = y
+                  }
+                  val bw = x1 - x0 + 1
+                  val bh = y1 - y0 + 1
+                  val inC = BooleanArray(bw * bh)
+                  for (i in 0 until bestN) inC[(best[i] / w - y0) * bw + (best[i] % w - x0)] = true
+
+                  // flood from the box border: anything not reached and not in the blob is an enclosed hole
+                  val out = BooleanArray(bw * bh)
+                  val q = IntArray(bw * bh)
+                  var head = 0
+                  var tail = 0
+                  fun push(x: Int, y: Int) {
+                      val k = y * bw + x
+                      if (!inC[k] && !out[k]) { out[k] = true; q[tail++] = k }
+                  }
+                  for (x in 0 until bw) { push(x, 0); push(x, bh - 1) }
+                  for (y in 0 until bh) { push(0, y); push(bw - 1, y) }
+                  while (head < tail) {
+                      val k = q[head++]
+                      val x = k % bw
+                      val y = k / bw
+                      if (x > 0) push(x - 1, y)
+                      if (x < bw - 1) push(x + 1, y)
+                      if (y > 0) push(x, y - 1)
+                      if (y < bh - 1) push(x, y + 1)
+                  }
+
+                  var fx = 0.0; var fy = 0.0; var fn = 0
+                  var rx = 0.0; var ry = 0.0; var rn = 0
+                  for (y in 0 until bh) for (x in 0 until bw) {
+                      val k = y * bw + x
+                      if (out[k]) continue
+                      fx += x; fy += y; fn++
+                      if (!inC[k]) {
+                          val o = (y0 + y) * stride + (x0 + x) * 4
+                          if ((px[o].toInt() and 255) > LIGHT &&
+                              (px[o + 1].toInt() and 255) > LIGHT &&
+                              (px[o + 2].toInt() and 255) > LIGHT
+                          ) { rx += x; ry += y; rn++ }
+                      }
+                  }
+                  if (fn == 0) return null
+                  val cx = (x0 + fx / fn).toFloat()
+                  val cy = (y0 + fy / fn).toFloat()
+                  val ang = if (rn >= MIN_RING) atan2(ry / rn - fy / fn, rx / rn - fx / fn).toFloat() else null
+                  return Result(cx, cy, ang)
+              }
+
+              companion object {
+                  const val DARK = 60
+                  const val LIGHT = 150
+                  const val MIN_FRAC = 0.0006
+                  const val MAX_FRAC = 0.02
+                  const val MIN_RING = 4
+              }
+          }
+          AIMLINE_EOF
+          cat > app/src/main/java/com/example/aimline/LineView.kt <<'AIMLINE_EOF'
+          package com.example.aimline
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.DashPathEffect
+          import android.graphics.Paint
+          import android.view.View
+          import kotlin.math.cos
+          import kotlin.math.hypot
+          import kotlin.math.sin
+
+          /** Transparent, touch-through view that draws a dotted line from the player. */
+          class LineView(context: Context) : View(context) {
+              @Volatile var sx = 0f
+              @Volatile var sy = 0f
+              @Volatile var angle = 0f
+              @Volatile var visible = false
+
+              // Orange so it is never mistaken for the game's near-black sprite by the detector.
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.rgb(255, 120, 0)
+                  strokeWidth = 7f
+                  strokeCap = Paint.Cap.ROUND
+                  pathEffect = DashPathEffect(floatArrayOf(1f, 20f), 0f)
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  if (!visible) return
+                  val len = hypot(width.toFloat(), height.toFloat())
+                  canvas.drawLine(sx, sy, sx + cos(angle) * len, sy + sin(angle) * len, paint)
+              }
+          }
+          AIMLINE_EOF
+          cat > app/src/main/java/com/example/aimline/OverlayService.kt <<'AIMLINE_EOF'
+          package com.example.aimline
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.drawable.Icon
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import android.os.SystemClock
+          import android.view.Gravity
+          import android.view.WindowManager
+          import kotlin.math.atan2
+          import kotlin.math.cos
+          import kotlin.math.sin
+
+          class OverlayService : Service() {
+
+              private var projection: MediaProjection? = null
+              private var vDisplay: VirtualDisplay? = null
+              private var reader: ImageReader? = null
+              private var overlay: LineView? = null
+              private var wm: WindowManager? = null
+              private val thread = HandlerThread("aimline-detect").apply { start() }
+              private lateinit var handler: Handler
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              @Suppress("DEPRECATION")
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent == null || intent.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
+                  if (projection != null) return START_NOT_STICKY
+                  handler = Handler(thread.looper)
+
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("aim", "Aim line", NotificationManager.IMPORTANCE_LOW))
+                  val stopPi = PendingIntent.getService(
+                      this, 0, Intent(this, OverlayService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE
+                  )
+                  val stopAction = Notification.Action.Builder(
+                      Icon.createWithResource(this, android.R.drawable.ic_delete), "Stop", stopPi
+                  ).build()
+                  val notif = Notification.Builder(this, "aim")
+                      .setSmallIcon(android.R.drawable.ic_menu_compass)
+                      .setContentTitle("Aim line is running")
+                      .addAction(stopAction)
+                      .build()
+                  startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+
+                  val code = intent.getIntExtra("code", 0)
+                  val data = intent.getParcelableExtra<Intent>("data") ?: run { stopSelf(); return START_NOT_STICKY }
+                  val mpm = getSystemService(MediaProjectionManager::class.java)
+                  val proj = mpm.getMediaProjection(code, data)
+                  projection = proj
+                  proj.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { stopSelf() }
+                  }, handler)
+
+                  val windowManager = getSystemService(WindowManager::class.java)
+                  wm = windowManager
+                  val bounds = windowManager.maximumWindowMetrics.bounds
+                  val sw = bounds.width()
+                  val sh = bounds.height()
+                  val cw = sw / SCALE
+                  val ch = sh / SCALE
+
+                  val view = LineView(this)
+                  overlay = view
+                  val lp = WindowManager.LayoutParams(
+                      sw, sh,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                  windowManager.addView(view, lp)
+
+                  val detector = Detector(cw, ch)
+                  val prefs = getSharedPreferences("p", MODE_PRIVATE)
+                  val img = ImageReader.newInstance(cw, ch, PixelFormat.RGBA_8888, 2)
+                  reader = img
+                  var bytes = ByteArray(0)
+                  var ax = 0f; var ay = 0f; var vx = 1f; var vy = 0f
+                  var has = false
+                  var lastSeen = 0L
+                  var lastRun = 0L
+
+                  img.setOnImageAvailableListener({ r ->
+                      val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          val now = SystemClock.uptimeMillis()
+                          if (now - lastRun < 30) return@setOnImageAvailableListener
+                          lastRun = now
+                          val plane = image.planes[0]
+                          val buf = plane.buffer
+                          if (bytes.size != buf.remaining()) bytes = ByteArray(buf.remaining())
+                          buf.get(bytes)
+                          val res = detector.detect(bytes, plane.rowStride)
+                          if (res != null) {
+                              val x = res.x * SCALE
+                              val y = res.y * SCALE
+                              if (!has) { ax = x; ay = y } else { ax += (x - ax) * 0.6f; ay += (y - ay) * 0.6f }
+                              res.angle?.let { a ->
+                                  val off = Math.toRadians(prefs.getInt("off", 0).toDouble()).toFloat()
+                                  vx += (cos(a + off) - vx) * 0.5f
+                                  vy += (sin(a + off) - vy) * 0.5f
+                              }
+                              has = true
+                              lastSeen = now
+                              view.sx = ax; view.sy = ay; view.angle = atan2(vy, vx); view.visible = true
+                          } else if (now - lastSeen > 400) {
+                              view.visible = false
+                          }
+                          view.postInvalidate()
+                      } finally {
+                          image.close()
+                      }
+                  }, handler)
+
+                  vDisplay = proj.createVirtualDisplay(
+                      "aimline", cw, ch, resources.displayMetrics.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, img.surface, null, handler
+                  )
+                  return START_NOT_STICKY
+              }
+
+              override fun onDestroy() {
+                  vDisplay?.release()
+                  reader?.close()
+                  projection?.stop()
+                  overlay?.let { runCatching { wm?.removeView(it) } }
+                  thread.quitSafely()
+                  super.onDestroy()
+              }
+
+              companion object {
+                  const val ACTION_STOP = "com.example.aimline.STOP"
+                  const val SCALE = 3
+              }
+          }
+          AIMLINE_EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AimLine-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: AimLine build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
